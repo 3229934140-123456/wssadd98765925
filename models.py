@@ -101,7 +101,7 @@ class ReviewSummary:
     anomaly_count: int
     raw_segments: List[AnomalySegment] = field(default_factory=list)
 
-    def to_text_report(self, rules: Optional["ScreenRules"] = None) -> str:
+    def to_text_report(self, rules: Optional["ScreenRules"] = None, route: Optional[str] = None) -> str:
         lines = []
         lines.append("=" * 60)
         lines.append("冷链运输监控复盘摘要")
@@ -116,7 +116,7 @@ class ReviewSummary:
             lines.append("-" * 60)
             lines.append("本次采用筛查规则")
             lines.append("-" * 60)
-            lines.append(rules.to_markdown())
+            lines.append(rules.to_markdown(route))
             lines.append("")
 
         lines.append("-" * 60)

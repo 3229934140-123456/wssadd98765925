@@ -17,7 +17,7 @@ from reporter import (
 
 BANNER = r"""
   ╔══════════════════════════════════════════╗
-  ║   冷链运营数据核对工具  v1.1            ║
+  ║   冷链运营数据核对工具  v1.2            ║
   ║   Cold Chain Log Checker                ║
   ╚══════════════════════════════════════════╝
 """
@@ -101,7 +101,7 @@ def cmd_scan(args):
     if not segments:
         print("未检测到异常片段。所有行程数据正常。")
         print("\n本次采用筛查规则:")
-        print(rules.to_markdown())
+        print(rules.to_markdown(args.route))
         return
 
     print("=" * 70)
@@ -126,10 +126,10 @@ def cmd_scan(args):
     for label_name, cnt in label_counts.items():
         print(f"  {label_name}: {cnt}个")
     print("\n本次采用筛查规则:")
-    print(rules.to_markdown())
+    print(rules.to_markdown(args.route))
 
     if getattr(args, "export_csv", None):
-        csv_path = export_anomaly_csv(segments, args.export_csv, rules=rules)
+        csv_path = export_anomaly_csv(segments, args.export_csv, rules=rules, route=args.route)
         print(f"\n异常证据表已导出: {csv_path}")
 
 
@@ -166,18 +166,18 @@ def cmd_report(args):
     if not route_val and len({t.route for t in filtered_trips}) == 1:
         route_val = list({t.route for t in filtered_trips})[0]
 
-    summary = build_review_summary(plate_val, route_val, filtered_trips, segments)
+    summary = build_review_summary(plate_val, route_val, filtered_trips, segments, rules)
 
     output_dir = args.output or "."
-    filepath = export_report(summary, output_dir=output_dir, rules=rules)
+    filepath = export_report(summary, output_dir=output_dir, rules=rules, route=route_val)
     print(f"\n复盘摘要已导出: {filepath}")
 
     if getattr(args, "export_csv", None):
-        csv_path = export_anomaly_csv(segments, args.output or output_dir, rules=rules)
+        csv_path = export_anomaly_csv(segments, args.output or output_dir, rules=rules, route=route_val)
         print(f"异常证据表已导出: {csv_path}")
 
     print("\n--- 报告预览 ---\n")
-    print(summary.to_text_report(rules=rules))
+    print(summary.to_text_report(rules=rules, route=route_val))
 
 
 def cmd_batch(args):
@@ -198,6 +198,19 @@ def cmd_batch(args):
     trips = group_into_trips(records, rules)
     segments = detect_all_trips(trips, rules)
 
+    prev_trips = None
+    prev_segments = None
+    prev_date_from = getattr(args, "prev_date_from", None)
+    prev_date_to = getattr(args, "prev_date_to", None)
+    prev_dir = getattr(args, "prev_dir", None)
+
+    if prev_dir and os.path.isdir(prev_dir):
+        print(f"正在加载对比期数据: {prev_dir}")
+        prev_records = load_logs_from_dir(prev_dir)
+        prev_trips = group_into_trips(prev_records, rules)
+        prev_segments = detect_all_trips(prev_trips, rules)
+        print(f"  对比期已加载 {len(prev_records)} 条记录")
+
     output_dir = args.output or "batch_reports"
     result: BatchReviewResult = build_batch_review(
         dirpath=dirpath,
@@ -209,11 +222,16 @@ def cmd_batch(args):
         date_from=args.date_from,
         date_to=args.date_to,
         route=args.route,
+        prev_trips=prev_trips,
+        prev_segments=prev_segments,
+        prev_date_from=prev_date_from,
+        prev_date_to=prev_date_to,
     )
 
     batch_root = os.path.dirname(result.overview_path)
     print(f"\n批量复盘完成，结果输出到: {batch_root}")
-    print(f"  总览报告: {result.overview_path}")
+    print(f"  总览TXT: {result.overview_path}")
+    print(f"  总览Markdown: {result.markdown_path}")
     print(f"  证据表CSV: {result.evidence_csv_path}")
     print(f"  单车明细: {result.total_vehicles} 辆车")
     for plate, path in sorted(result.per_vehicle_paths.items()):
@@ -274,11 +292,14 @@ def main():
     p_report.add_argument("--output", default=".", help="报告输出目录 (默认当前目录)")
     p_report.add_argument("--export-csv", action="store_true", help="同时导出异常证据表CSV")
 
-    p_batch = sub.add_parser("batch", help="批量复盘：按日期范围+线路，多车总览+单车明细+CSV证据表")
+    p_batch = sub.add_parser("batch", help="批量复盘：多车总览+单车明细+Markdown+CSV证据表+月度趋势")
     p_batch.add_argument("dir", help="日志文件目录路径")
     _add_filter_args(p_batch)
     _add_rule_args(p_batch)
     p_batch.add_argument("--output", default="batch_reports", help="输出根目录")
+    p_batch.add_argument("--prev-dir", default=None, help="对比期(上月)日志目录，用于趋势对比")
+    p_batch.add_argument("--prev-date-from", default=None, help="对比期起始日期 (YYYY-MM-DD)")
+    p_batch.add_argument("--prev-date-to", default=None, help="对比期结束日期 (YYYY-MM-DD)")
 
     p_plates = sub.add_parser("list", help="列出目录中所有车牌、线路、日期")
     p_plates.add_argument("dir", help="日志文件目录路径")

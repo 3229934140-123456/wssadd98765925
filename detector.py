@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import List, Optional, Set
+from datetime import timedelta
+from typing import Dict, List, Optional, Set
 
 from config import ScreenRules
 from models import AnomalyLabel, AnomalySegment, LogRecord, Trip
@@ -12,6 +13,19 @@ class JumpSnapshot:
     after: Optional[float] = None
     delta: float = 0.0
     kind: str = ""
+
+
+_LABEL_PRIORITY = {
+    AnomalyLabel.SENSOR_MALFUNCTION: 3,
+    AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING: 2,
+    AnomalyLabel.PURE_TEMP_FLUCTUATION: 1,
+}
+
+
+def _higher_label(a: AnomalyLabel, b: AnomalyLabel) -> AnomalyLabel:
+    if _LABEL_PRIORITY.get(a, 0) >= _LABEL_PRIORITY.get(b, 0):
+        return a
+    return b
 
 
 def _count_reefer_cycles(records: List[LogRecord]) -> int:
@@ -89,33 +103,45 @@ def _build_detail(
     reefer_cycles: int,
     jumps: List[JumpSnapshot],
 ) -> str:
-    if label == AnomalyLabel.SENSOR_MALFUNCTION and jumps:
-        parts = []
+    parts = []
+
+    if jumps:
+        jump_parts = []
         for j in jumps:
             before_str = f"{j.before:.1f}" if j.before is not None else "N/A"
             after_str = f"{j.after:.1f}" if j.after is not None else "N/A"
             unit = "bar" if j.kind == "胎压跳变" else "°C"
             target = j.wheel if j.kind == "胎压跳变" else "厢温"
-            parts.append(
+            jump_parts.append(
                 f"{target}{before_str}{unit}→{after_str}{unit}(Δ{j.delta:+.1f})"
             )
-        jumps_str = "；".join(parts)
-        return f"{jumps_str}。建议复核：检查传感器线缆、采集频率及前后采样读数。"
-    if label == AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING:
+        parts.append("跳变: " + "；".join(jump_parts))
+
+    if abnormal_wheels:
         wheels_str = "、".join(abnormal_wheels)
-        return (
-            f"轮位{wheels_str}胎压异常，厢温偏移{temp_delta:+.1f}°C，"
-            f"冷机启停{reefer_cycles}次，疑似胎压拖累制冷效率。建议复核：轮位实际气压、冷机制冷电流。"
-        )
-    return (
-        f"厢温波动{temp_delta:+.1f}°C，冷机启停{reefer_cycles}次，未关联胎压异常。"
-        f"建议复核：开门记录、环境温度、装载作业。"
-    )
+        parts.append(f"异常轮位: {wheels_str}")
+
+    if label == AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING:
+        parts.append(f"厢温偏移{temp_delta:+.1f}°C")
+        parts.append(f"冷机启停{reefer_cycles}次")
+        parts.append("建议复核：轮位实际气压、冷机制冷电流")
+        return "疑似胎压拖累制冷。" + "；".join(parts) + "。"
+
+    if label == AnomalyLabel.SENSOR_MALFUNCTION:
+        parts.append("建议复核：检查传感器线缆、采集频率及前后采样读数")
+        return "传感器可能失准。" + "；".join(parts) + "。"
+
+    parts.append(f"厢温波动{temp_delta:+.1f}°C")
+    parts.append(f"冷机启停{reefer_cycles}次")
+    parts.append("建议复核：开门记录、环境温度、装载作业")
+    return "单纯温度波动。" + "；".join(parts) + "。"
 
 
 def detect_anomalies(trip: Trip, rules: ScreenRules) -> List[AnomalySegment]:
     if len(trip.records) < 2:
         return []
+
+    effective_rules = rules.rules_for_route(trip.route)
 
     segments: List[AnomalySegment] = []
     buf: List[LogRecord] = []
@@ -124,12 +150,12 @@ def detect_anomalies(trip: Trip, rules: ScreenRules) -> List[AnomalySegment]:
     all_jumps: List[JumpSnapshot] = []
 
     for rec in trip.records:
-        tire_abnormal = rec.is_tire_pressure_abnormal(rules.tire_low, rules.tire_high)
+        tire_abnormal = rec.is_tire_pressure_abnormal(effective_rules.tire_low, effective_rules.tire_high)
         temp_abnormal = (
             prev_rec is not None
-            and abs(rec.compartment_temp - prev_rec.compartment_temp) >= rules.temp_fluctuation
+            and abs(rec.compartment_temp - prev_rec.compartment_temp) >= effective_rules.temp_fluctuation
         )
-        jumps, sensor_jump = _detect_sensor_jumps(prev_rec, rec, rules)
+        jumps, sensor_jump = _detect_sensor_jumps(prev_rec, rec, effective_rules)
         is_anomaly = bool(tire_abnormal) or temp_abnormal or sensor_jump
 
         if is_anomaly:
@@ -141,7 +167,7 @@ def detect_anomalies(trip: Trip, rules: ScreenRules) -> List[AnomalySegment]:
                 buf.append(rec)
         else:
             if in_anomaly:
-                seg = _finalize_segment(buf, trip, rules, all_jumps)
+                seg = _finalize_segment(buf, trip, effective_rules, all_jumps)
                 if seg:
                     segments.append(seg)
                 buf = []
@@ -151,16 +177,15 @@ def detect_anomalies(trip: Trip, rules: ScreenRules) -> List[AnomalySegment]:
         prev_rec = rec
 
     if in_anomaly and buf:
-        seg = _finalize_segment(buf, trip, rules, all_jumps)
+        seg = _finalize_segment(buf, trip, effective_rules, all_jumps)
         if seg:
             segments.append(seg)
 
-    if rules.enable_single_point_anomaly:
+    if effective_rules.enable_single_point_anomaly:
         segments = sorted(segments, key=lambda s: s.start_time)
         covered_ranges = []
         for seg in segments:
             if seg.duration_minutes > 0:
-                from datetime import timedelta
                 end = seg.start_time + timedelta(minutes=seg.duration_minutes)
                 covered_ranges.append((seg.start_time, end))
 
@@ -171,17 +196,56 @@ def detect_anomalies(trip: Trip, rules: ScreenRules) -> List[AnomalySegment]:
             return False
 
         for i in range(1, len(trip.records)):
-            jumps, sensor_jump = _detect_sensor_jumps(trip.records[i - 1], trip.records[i], rules)
+            jumps, sensor_jump = _detect_sensor_jumps(trip.records[i - 1], trip.records[i], effective_rules)
             tire_abnormal = trip.records[i].is_tire_pressure_abnormal(
-                rules.tire_low, rules.tire_high
+                effective_rules.tire_low, effective_rules.tire_high
             )
             ts = trip.records[i].timestamp
             if (sensor_jump or tire_abnormal) and not _is_covered(ts):
-                seg = _build_single_point_segment(trip.records[i - 1], trip.records[i], trip, rules, jumps)
+                seg = _build_single_point_segment(
+                    trip.records[i - 1], trip.records[i], trip, effective_rules, jumps
+                )
                 if seg:
                     segments.append(seg)
 
-    return sorted(segments, key=lambda s: s.start_time)
+    segments = sorted(segments, key=lambda s: s.start_time)
+    segments = _deduplicate_by_timestamp(segments)
+    return segments
+
+
+def _deduplicate_by_timestamp(segments: List[AnomalySegment]) -> List[AnomalySegment]:
+    if not segments:
+        return segments
+
+    grouped: Dict = {}
+    for seg in segments:
+        key = (seg.plate, seg.route, seg.start_time)
+        if key not in grouped:
+            grouped[key] = seg
+        else:
+            existing = grouped[key]
+            best_label = _higher_label(existing.label, seg.label)
+            merged_wheels = sorted(set(existing.abnormal_wheels) | set(seg.abnormal_wheels))
+            merged_detail_parts = []
+            if existing.detail:
+                merged_detail_parts.append(existing.detail)
+            if seg.detail and seg.detail != existing.detail:
+                merged_detail_parts.append(seg.detail)
+
+            merged = AnomalySegment(
+                start_time=existing.start_time,
+                duration_minutes=max(existing.duration_minutes, seg.duration_minutes),
+                abnormal_wheels=merged_wheels,
+                temp_change=existing.temp_change if abs(existing.temp_change) >= abs(seg.temp_change) else seg.temp_change,
+                reefer_cycles=max(existing.reefer_cycles, seg.reefer_cycles),
+                label=best_label,
+                plate=existing.plate,
+                route=existing.route,
+                detail="；".join(merged_detail_parts) if merged_detail_parts else "",
+            )
+            grouped[key] = merged
+
+    return sorted(grouped.values(), key=lambda s: s.start_time)
 
 
 def _build_single_point_segment(
@@ -252,12 +316,6 @@ def detect_all_trips(trips: List[Trip], rules: ScreenRules) -> List[AnomalySegme
     all_segments: List[AnomalySegment] = []
     for trip in trips:
         all_segments.extend(detect_anomalies(trip, rules))
-    seen = set()
-    unique: List[AnomalySegment] = []
-    for seg in sorted(all_segments, key=lambda s: s.start_time):
-        key = (seg.plate, seg.route, seg.start_time, seg.label.value)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(seg)
-    return unique
+
+    result = _deduplicate_by_timestamp(all_segments)
+    return result

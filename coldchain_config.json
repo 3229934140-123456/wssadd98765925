@@ -6,5 +6,17 @@
   "sensor_jump_temp": 10.0,
   "trip_gap_minutes": 30.0,
   "min_segment_minutes": 2.0,
-  "enable_single_point_anomaly": true
+  "enable_single_point_anomaly": true,
+  "route_overrides": {
+    "R001": {
+      "tire_low": 5.0,
+      "tire_high": 8.5,
+      "comment": "干线长途，胎压要求更严"
+    },
+    "R007": {
+      "tire_low": 4.0,
+      "temp_fluctuation": 4.0,
+      "comment": "市配短途，放宽温度跳变口径"
+    }
+  }
 }
