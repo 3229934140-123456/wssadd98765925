@@ -5,6 +5,18 @@ from dataclasses import asdict, dataclass
 from typing import Dict, Optional
 
 
+RULE_KEYS = [
+    "tire_low",
+    "tire_high",
+    "temp_fluctuation",
+    "sensor_jump_pressure",
+    "sensor_jump_temp",
+    "trip_gap_minutes",
+    "min_segment_minutes",
+    "enable_single_point_anomaly",
+]
+
+
 @dataclass
 class ScreenRules:
     tire_low: float = 4.5
@@ -16,40 +28,68 @@ class ScreenRules:
     min_segment_minutes: float = 2.0
     enable_single_point_anomaly: bool = True
     route_overrides: Dict[str, dict] = None
+    _cli_overrides: Dict[str, bool] = None
 
     def __post_init__(self):
         if self.route_overrides is None:
             self.route_overrides = {}
+        if self._cli_overrides is None:
+            self._cli_overrides = {}
+
+    def _apply_cli_overrides(self, overrides: dict):
+        for key, val in overrides.items():
+            if val is not None and key in RULE_KEYS:
+                setattr(self, key, val)
+                self._cli_overrides[key] = True
 
     def rules_for_route(self, route: Optional[str]) -> "ScreenRules":
-        if not route or route not in self.route_overrides:
-            base = copy.deepcopy(self)
-            base.route_overrides = {}
-            return base
-        overrides = self.route_overrides[route]
         base = copy.deepcopy(self)
         base.route_overrides = {}
-        for key, val in overrides.items():
-            if hasattr(base, key):
-                setattr(base, key, val)
+        cli_flags = dict(base._cli_overrides)
+        base._cli_overrides = {}
+
+        if route and route in self.route_overrides:
+            for key, val in self.route_overrides[route].items():
+                if key in RULE_KEYS and not cli_flags.get(key):
+                    setattr(base, key, val)
+
+        for key, was_cli in cli_flags.items():
+            if was_cli:
+                base._cli_overrides[key] = True
         return base
+
+    def describe_source(self, route: Optional[str] = None) -> str:
+        sources = []
+        if self._cli_overrides:
+            cli_keys = [k for k in RULE_KEYS if self._cli_overrides.get(k)]
+            sources.append(f"命令行覆盖({', '.join(cli_keys)})")
+        if route and route in self.route_overrides:
+            sources.append(f"线路{route}专用规则")
+        sources.append("默认规则")
+        return " → ".join(sources)
 
     def to_markdown(self, route: Optional[str] = None) -> str:
         effective = self.rules_for_route(route)
-        source = "默认规则"
-        if route and route in self.route_overrides:
-            source = f"线路{route}专用规则(覆盖默认)"
-        lines = [
-            f"  规则来源: {source}",
-            f"  胎压下限: {effective.tire_low} bar",
-            f"  胎压上限: {effective.tire_high} bar",
-            f"  温度波动阈值: ±{effective.temp_fluctuation}°C",
-            f"  胎压传感器跳变阈值: {effective.sensor_jump_pressure} bar",
-            f"  温度传感器跳变阈值: {effective.sensor_jump_temp}°C",
-            f"  行程切分间隔: {effective.trip_gap_minutes} min",
-            f"  最短异常片段时长: {effective.min_segment_minutes} min",
-            f"  启用单点异常保留: {'是' if effective.enable_single_point_anomaly else '否'}",
-        ]
+        source = self.describe_source(route)
+        lines = [f"  规则来源链: {source}"]
+
+        display = effective
+        for key in RULE_KEYS:
+            base_val = getattr(self, key)
+            eff_val = getattr(display, key)
+            cli_override = self._cli_overrides.get(key)
+            route_override = (
+                route
+                and route in self.route_overrides
+                and key in self.route_overrides[route]
+            )
+            origin_label = ""
+            if cli_override:
+                origin_label = " (CLI覆盖)"
+            elif route_override and not cli_override:
+                origin_label = " (线路覆盖)"
+            lines.append(f"  {key}: {eff_val}{origin_label}")
+
         if self.route_overrides:
             lines.append(f"  已配置线路覆盖: {', '.join(sorted(self.route_overrides.keys()))}")
         return "\n".join(lines)
@@ -84,9 +124,7 @@ def load_config(path: Optional[str] = None) -> ScreenRules:
 
 
 def apply_cli_overrides(rules: ScreenRules, overrides: dict) -> ScreenRules:
-    for key, val in overrides.items():
-        if val is not None and hasattr(rules, key):
-            setattr(rules, key, val)
+    rules._apply_cli_overrides(overrides)
     return rules
 
 

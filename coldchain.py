@@ -17,7 +17,7 @@ from reporter import (
 
 BANNER = r"""
   ╔══════════════════════════════════════════╗
-  ║   冷链运营数据核对工具  v1.2            ║
+  ║   冷链运营数据核对工具  v1.3            ║
   ║   Cold Chain Log Checker                ║
   ╚══════════════════════════════════════════╝
 """
@@ -233,6 +233,7 @@ def cmd_batch(args):
     print(f"  总览TXT: {result.overview_path}")
     print(f"  总览Markdown: {result.markdown_path}")
     print(f"  证据表CSV: {result.evidence_csv_path}")
+    print(f"  闭环清单CSV: {result.closedloop_csv_path}")
     print(f"  单车明细: {result.total_vehicles} 辆车")
     for plate, path in sorted(result.per_vehicle_paths.items()):
         print(f"    - {plate}: {path}")

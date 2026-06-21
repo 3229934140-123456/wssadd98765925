@@ -1,0 +1,14 @@
+﻿筛查规则
+规则来源链: 线路R001专用规则 → 默认规则
+tire_low: 5.0 (线路覆盖)
+tire_high: 8.5 (线路覆盖)
+temp_fluctuation: 3.0
+sensor_jump_pressure: 3.0
+sensor_jump_temp: 10.0
+trip_gap_minutes: 30.0
+min_segment_minutes: 2.0
+enable_single_point_anomaly: True
+"已配置线路覆盖: R001, R007"
+
+车牌,线路,开始时间,持续分钟,异常轮位,厢温变化(°C),冷机启停次数,异常分类,详情
+京A12345,R001,2026-06-20 06:40:00,90.0,"FL,FR,RL,RR",+2.50,8,疑似胎压拖累制冷,疑似胎压拖累制冷。异常轮位: FL、FR、RL、RR；厢温偏移+2.5°C；冷机启停8次；建议复核：轮位实际气压、冷机制冷电流。

@@ -9,6 +9,35 @@ from config import ScreenRules
 from models import AnomalyLabel, AnomalySegment, ReviewSummary, Trip
 
 
+CLOSEDLOOP_CSV_HEADERS = [
+    "车牌",
+    "线路",
+    "待复核轮位",
+    "异常次数",
+    "建议处理人",
+    "证据文件路径",
+    "最高风险异常类型",
+    "处理状态",
+    "备注",
+]
+
+
+DEFAULT_HANDLERS = {
+    "R001": "张队长(干线)",
+    "R002": "李队长(城际)",
+    "R003": "王队长(支线)",
+    "R004": "赵队长(冷链)",
+    "R005": "钱队长(零担)",
+    "R006": "孙队长(配送)",
+    "R007": "周队长(市配)",
+    "R008": "吴队长(夜间)",
+}
+
+
+def _suggest_handler(route: str) -> str:
+    return DEFAULT_HANDLERS.get(route, f"{route}线路车队长")
+
+
 def build_review_summary(
     plate: Optional[str],
     route: Optional[str],
@@ -75,11 +104,11 @@ def _build_missing_driver_records(
         if seg.label == AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING:
             wheels_str = "、".join(seg.abnormal_wheels) if seg.abnormal_wheels else "异常"
             records.append(
-                f"{seg.start_time.strftime('%m-%d %H:%M')} [{seg.plate}] 胎压异常轮位{wheels_str}未发现司机处置记录"
+                f"{seg.start_time.strftime('%m-%d %H:%M')} [{seg.plate}] {seg.route} 胎压异常轮位{wheels_str}未发现司机处置记录"
             )
         if seg.reefer_cycles >= 3:
             records.append(
-                f"{seg.start_time.strftime('%m-%d %H:%M')} [{seg.plate}] 冷机启停{seg.reefer_cycles}次，缺乏手动干预记录"
+                f"{seg.start_time.strftime('%m-%d %H:%M')} [{seg.plate}] {seg.route} 冷机启停{seg.reefer_cycles}次，缺乏手动干预记录"
             )
     return records
 
@@ -248,77 +277,87 @@ def _risk_score(data: Dict) -> float:
     )
 
 
-def _compute_risk_by_plate(
+def _compute_risk_by_plate_route(
     trips: List[Trip],
     segments: List[AnomalySegment],
-) -> Tuple[Dict[str, Dict], Dict[str, set]]:
-    risk_by_plate: Dict[str, Dict] = defaultdict(lambda: {
+) -> Tuple[Dict[tuple, Dict], Dict[tuple, int], Dict[str, set]]:
+    risk: Dict[tuple, Dict] = defaultdict(lambda: {
         "tire_drag": 0,
         "temp_fluc": 0,
         "sensor": 0,
         "reefer_cycles": 0,
         "trips": 0,
     })
-    plate_trips = defaultdict(set)
+    trip_count: Dict[tuple, int] = defaultdict(int)
+    plate_routes = defaultdict(set)
+
     for t in trips:
-        plate_trips[t.plate].add(t.route)
-        risk_by_plate[t.plate]["trips"] += 1
+        key = (t.plate, t.route)
+        risk[key]["trips"] += 1
+        trip_count[key] += 1
+        plate_routes[t.plate].add(t.route)
 
     for seg in segments:
+        key = (seg.plate, seg.route)
         if seg.label == AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING:
-            risk_by_plate[seg.plate]["tire_drag"] += 1
+            risk[key]["tire_drag"] += 1
         elif seg.label == AnomalyLabel.PURE_TEMP_FLUCTUATION:
-            risk_by_plate[seg.plate]["temp_fluc"] += 1
+            risk[key]["temp_fluc"] += 1
         elif seg.label == AnomalyLabel.SENSOR_MALFUNCTION:
-            risk_by_plate[seg.plate]["sensor"] += 1
-        risk_by_plate[seg.plate]["reefer_cycles"] += seg.reefer_cycles
+            risk[key]["sensor"] += 1
+        risk[key]["reefer_cycles"] += seg.reefer_cycles
 
-    return risk_by_plate, plate_trips
+    return risk, trip_count, plate_routes
 
 
 def _compute_risk_by_route(
-    trips: List[Trip],
-    segments: List[AnomalySegment],
+    risk_by_pr: Dict[tuple, Dict],
 ) -> Dict[str, Dict]:
-    risk_by_route: Dict[str, Dict] = defaultdict(lambda: {
+    route_risk: Dict[str, Dict] = defaultdict(lambda: {
         "tire_drag": 0,
         "temp_fluc": 0,
         "sensor": 0,
         "anomaly_total": 0,
         "vehicles": set(),
+        "worse_count": 0,
+        "highest_risk_plate": "",
+        "highest_risk_score": 0.0,
+        "score": 0.0,
     })
-    for t in trips:
-        risk_by_route[t.route]["vehicles"].add(t.plate)
 
-    for seg in segments:
-        risk_by_route[seg.route]["anomaly_total"] += 1
-        if seg.label == AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING:
-            risk_by_route[seg.route]["tire_drag"] += 1
-        elif seg.label == AnomalyLabel.PURE_TEMP_FLUCTUATION:
-            risk_by_route[seg.route]["temp_fluc"] += 1
-        elif seg.label == AnomalyLabel.SENSOR_MALFUNCTION:
-            risk_by_route[seg.route]["sensor"] += 1
+    for (plate, route), data in risk_by_pr.items():
+        rd = route_risk[route]
+        rd["vehicles"].add(plate)
+        rd["tire_drag"] += data["tire_drag"]
+        rd["temp_fluc"] += data["temp_fluc"]
+        rd["sensor"] += data["sensor"]
+        rd["anomaly_total"] += data["tire_drag"] + data["temp_fluc"] + data["sensor"]
+        score = _risk_score(data)
+        rd["score"] += score
+        if score > rd["highest_risk_score"]:
+            rd["highest_risk_score"] = score
+            rd["highest_risk_plate"] = plate
 
-    return risk_by_route
+    return route_risk
 
 
 def _compute_trend(
-    current_risk: Dict[str, Dict],
-    prev_risk: Optional[Dict[str, Dict]],
-) -> Dict[str, Dict]:
+    current_risk: Dict[tuple, Dict],
+    prev_risk: Dict[tuple, Dict],
+) -> Dict[tuple, Dict]:
     if prev_risk is None:
         return {}
 
-    trend: Dict[str, Dict] = {}
-    all_plates = set(current_risk.keys()) | set(prev_risk.keys())
-    for plate in all_plates:
-        cur = current_risk.get(plate, {"tire_drag": 0, "temp_fluc": 0, "sensor": 0, "reefer_cycles": 0})
-        prv = prev_risk.get(plate, {"tire_drag": 0, "temp_fluc": 0, "sensor": 0, "reefer_cycles": 0})
+    trend: Dict[tuple, Dict] = {}
+    all_keys = set(current_risk.keys()) | set(prev_risk.keys())
+    for key in all_keys:
+        cur = current_risk.get(key, {"tire_drag": 0, "temp_fluc": 0, "sensor": 0, "reefer_cycles": 0})
+        prv = prev_risk.get(key, {"tire_drag": 0, "temp_fluc": 0, "sensor": 0, "reefer_cycles": 0})
         cur_score = _risk_score(cur)
         prv_score = _risk_score(prv)
         cur_total = cur["tire_drag"] + cur["temp_fluc"] + cur["sensor"]
         prv_total = prv["tire_drag"] + prv["temp_fluc"] + prv["sensor"]
-        trend[plate] = {
+        trend[key] = {
             "cur_anomaly": cur_total,
             "prv_anomaly": prv_total,
             "anomaly_delta": cur_total - prv_total,
@@ -329,12 +368,94 @@ def _compute_trend(
     return trend
 
 
+def _compute_worse_vehicles_per_route(
+    trend: Dict[tuple, Dict],
+) -> Dict[str, List[tuple]]:
+    worse = defaultdict(list)
+    for (plate, route), t in trend.items():
+        if t["score_delta"] > 0:
+            worse[route].append((plate, t))
+    return worse
+
+
+def export_closedloop_csv(
+    segments: List[AnomalySegment],
+    per_vehicle_paths: Dict[str, str],
+    output_dir: str,
+    filename: Optional[str] = None,
+) -> str:
+    if not filename:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"异常闭环清单_{timestamp}.csv"
+
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, filename)
+
+    wheel_stats: Dict[tuple, Dict] = defaultdict(lambda: {
+        "count": 0,
+        "max_label": AnomalyLabel.PURE_TEMP_FLUCTUATION,
+    })
+    _label_priority = {
+        AnomalyLabel.SENSOR_MALFUNCTION: 3,
+        AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING: 2,
+        AnomalyLabel.PURE_TEMP_FLUCTUATION: 1,
+    }
+
+    for seg in segments:
+        if seg.label not in (AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING, AnomalyLabel.SENSOR_MALFUNCTION):
+            continue
+        for wheel in seg.abnormal_wheels:
+            key = (seg.plate, seg.route, wheel)
+            wheel_stats[key]["count"] += 1
+            cur_prio = _label_priority.get(seg.label, 0)
+            prev_prio = _label_priority.get(wheel_stats[key]["max_label"], 0)
+            if cur_prio > prev_prio:
+                wheel_stats[key]["max_label"] = seg.label
+
+    rows_by_vehicle_route: Dict[tuple, Dict] = defaultdict(lambda: {
+        "wheels": Counter(),
+        "max_label": AnomalyLabel.PURE_TEMP_FLUCTUATION,
+    })
+
+    for (plate, route, wheel), stats in wheel_stats.items():
+        vr_key = (plate, route)
+        rows_by_vehicle_route[vr_key]["wheels"][wheel] = stats["count"]
+        cur_prio = _label_priority.get(stats["max_label"], 0)
+        prev_prio = _label_priority.get(rows_by_vehicle_route[vr_key]["max_label"], 0)
+        if cur_prio > prev_prio:
+            rows_by_vehicle_route[vr_key]["max_label"] = stats["max_label"]
+
+    with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(CLOSEDLOOP_CSV_HEADERS)
+        for (plate, route), info in sorted(rows_by_vehicle_route.items()):
+            wheels_list = sorted(info["wheels"].items(), key=lambda x: -x[1])
+            wheel_str = ",".join(f"{w}×{c}" for w, c in wheels_list)
+            total_count = sum(info["wheels"].values())
+            handler = _suggest_handler(route)
+            evidence_path = per_vehicle_paths.get(plate, "")
+            writer.writerow([
+                plate,
+                route,
+                wheel_str,
+                str(total_count),
+                handler,
+                evidence_path,
+                info["max_label"].value,
+                "待复核",
+                "",
+            ])
+
+    return filepath
+
+
 @dataclass
 class BatchReviewResult:
     overview_path: str
     markdown_path: str
     per_vehicle_paths: Dict[str, str]
     evidence_csv_path: str
+    closedloop_csv_path: str
     total_segments: int
     total_vehicles: int
 
@@ -357,10 +478,9 @@ def build_batch_review(
     from parser import filter_trips as _filter_trips
 
     scope_trips = _filter_trips(trips, plate=plate, date_from=date_from, date_to=date_to, route=route)
+    scope_keys = sorted({(t.plate, t.route) for t in scope_trips})
     scope_plates = sorted({t.plate for t in scope_trips})
-    scope_segments = [s for s in segments if any(s.plate == t.plate for t in scope_trips)]
-    if route:
-        scope_segments = [s for s in scope_segments if s.route == route]
+    scope_segments = [s for s in segments if (s.plate, s.route) in set(scope_keys)]
     if date_from:
         scope_segments = [s for s in scope_segments if s.start_time.strftime("%Y-%m-%d") >= date_from]
     if date_to:
@@ -385,31 +505,34 @@ def build_batch_review(
         path = export_report(summary, output_dir=detail_dir, filename=fname, rules=rules, route=effective_route)
         per_vehicle_paths[p] = path
 
-    risk_by_plate, plate_trips = _compute_risk_by_plate(scope_trips, scope_segments)
-    risk_by_route = _compute_risk_by_route(scope_trips, scope_segments)
+    risk_by_pr, trip_count, plate_routes = _compute_risk_by_plate_route(scope_trips, scope_segments)
+    risk_by_route = _compute_risk_by_route(risk_by_pr)
 
     prev_risk = None
     trend = {}
     if prev_trips is not None and prev_segments is not None:
         prev_scope = _filter_trips(prev_trips, plate=plate, date_from=prev_date_from, date_to=prev_date_to, route=route)
-        prev_scope_segs = [s for s in prev_segments if any(s.plate == t.plate for t in prev_scope)]
-        if route:
-            prev_scope_segs = [s for s in prev_scope_segs if s.route == route]
-        prev_risk, _ = _compute_risk_by_plate(prev_scope, prev_scope_segs)
-        trend = _compute_trend(risk_by_plate, prev_risk)
+        prev_scope_keys = set((t.plate, t.route) for t in prev_scope)
+        prev_scope_segs = [s for s in prev_segments if (s.plate, s.route) in prev_scope_keys]
+        prev_risk, _, _ = _compute_risk_by_plate_route(prev_scope, prev_scope_segs)
+        trend = _compute_trend(risk_by_pr, prev_risk)
+        worse_by_route = _compute_worse_vehicles_per_route(trend)
+        for r, worse_list in worse_by_route.items():
+            if r in risk_by_route:
+                risk_by_route[r]["worse_count"] = len(worse_list)
 
     overview_path = _build_overview_file(
-        batch_dir, scope_plates, scope_trips, scope_segments, rules,
+        batch_dir, scope_keys, scope_trips, scope_segments, rules,
         plate, date_from, date_to, route, timestamp,
-        risk_by_plate, plate_trips, risk_by_route, trend,
+        risk_by_pr, trip_count, plate_routes, risk_by_route, trend,
         prev_date_from, prev_date_to,
     )
 
     md_path = _build_markdown_file(
-        batch_dir, scope_plates, scope_trips, scope_segments, rules,
+        batch_dir, scope_keys, scope_trips, scope_segments, rules,
         plate, date_from, date_to, route, timestamp,
-        risk_by_plate, plate_trips, risk_by_route, trend,
-        prev_date_from, prev_date_to,
+        risk_by_pr, trip_count, plate_routes, risk_by_route, trend,
+        prev_date_from, prev_date_to, per_vehicle_paths,
     )
 
     csv_path = export_anomaly_csv(
@@ -420,28 +543,76 @@ def build_batch_review(
         route=route,
     )
 
+    closedloop_path = export_closedloop_csv(
+        scope_segments,
+        per_vehicle_paths,
+        output_dir=batch_dir,
+        filename=f"异常闭环清单_{timestamp}.csv",
+    )
+
     return BatchReviewResult(
         overview_path=overview_path,
         markdown_path=md_path,
         per_vehicle_paths=per_vehicle_paths,
         evidence_csv_path=csv_path,
+        closedloop_csv_path=closedloop_path,
         total_segments=len(scope_segments),
         total_vehicles=len(scope_plates),
     )
 
 
+def _route_dashboard_entries(
+    risk_by_route: Dict[str, Dict],
+    segments: List[AnomalySegment],
+    per_vehicle_paths: Dict[str, str],
+) -> Dict[str, Dict]:
+    dashboard = {}
+    route_segments = defaultdict(list)
+    for seg in segments:
+        route_segments[seg.route].append(seg)
+
+    for r, rd in risk_by_route.items():
+        worst_plate = rd.get("highest_risk_plate", "")
+        worst_segs = [
+            s for s in route_segments.get(r, [])
+            if s.plate == worst_plate
+            and s.label in (AnomalyLabel.TIRE_PRESSURE_DRAG_COOLING, AnomalyLabel.SENSOR_MALFUNCTION)
+        ][:2]
+        evidence_rel = ""
+        if worst_plate and worst_plate in per_vehicle_paths:
+            try:
+                evidence_rel = os.path.relpath(
+                    per_vehicle_paths[worst_plate],
+                    os.path.dirname(os.path.commonprefix([per_vehicle_paths[worst_plate], os.path.join(".", "md.md")]))
+                )
+            except ValueError:
+                evidence_rel = per_vehicle_paths[worst_plate]
+
+        dashboard[r] = {
+            "overall_score": rd["score"],
+            "anomaly_total": rd["anomaly_total"],
+            "vehicle_count": len(rd["vehicles"]),
+            "worse_count": rd.get("worse_count", 0),
+            "worst_plate": worst_plate,
+            "worst_score": rd.get("highest_risk_score", 0.0),
+            "key_evidence": worst_segs,
+            "evidence_path": evidence_rel,
+        }
+    return dashboard
+
+
 def _build_overview_file(
-    batch_dir, plates, trips, segments, rules,
+    batch_dir, scope_keys, trips, segments, rules,
     plate_filter, date_from, date_to, route_filter, timestamp,
-    risk_by_plate, plate_trips, risk_by_route, trend,
+    risk_by_pr, trip_count, plate_routes, risk_by_route, trend,
     prev_date_from, prev_date_to,
 ) -> str:
-    ranked = sorted(plates, key=lambda p: -_risk_score(risk_by_plate[p]))
+    ranked = sorted(scope_keys, key=lambda k: -_risk_score(risk_by_pr[k]))
 
     lines = []
-    lines.append("=" * 70)
+    lines.append("=" * 90)
     lines.append("月度例会冷链运营批量复盘总览")
-    lines.append("=" * 70)
+    lines.append("=" * 90)
     lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("筛选范围:")
     lines.append(f"  车牌: {plate_filter or '全部'}")
@@ -449,69 +620,75 @@ def _build_overview_file(
     lines.append(f"  当期: {date_from or '不限'} ~ {date_to or '不限'}")
     if prev_date_from or prev_date_to:
         lines.append(f"  对比期: {prev_date_from or '不限'} ~ {prev_date_to or '不限'}")
-    lines.append(f"  覆盖车辆数: {len(plates)}  异常片段总数: {len(segments)}")
+    lines.append(f"  覆盖车辆数: {len({k[0] for k in scope_keys})}  "
+                 f"覆盖(车牌×线路)组合: {len(scope_keys)}  "
+                 f"异常片段总数: {len(segments)}")
     lines.append("")
 
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     lines.append("本次采用筛查规则")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     lines.append(rules.to_markdown(route_filter))
     lines.append("")
 
-    lines.append("-" * 70)
-    lines.append("风险车辆排名（由高到低）")
-    lines.append("-" * 70)
-    header = f"{'排名':<4}{'车牌':<12}{'线路':<10}{'行程':<4}{'胎压拖累':<8}{'温度波动':<8}{'传感器':<6}{'启停':<4}{'风险分':<6}"
+    lines.append("-" * 90)
+    lines.append("风险排名（按 车牌×线路 组合，由高到低）")
+    lines.append("-" * 90)
+    header = f"{'排名':<4}{'车牌':<12}{'线路':<8}{'行程':<4}{'胎压拖累':<8}{'温度波动':<8}{'传感器':<6}{'启停':<4}{'风险分':<6}"
     if trend:
-        header += f"{'异常Δ':<6}{'风险Δ':<6}"
+        header += f"{'异常Δ':<8}{'风险Δ':<8}"
     lines.append(header)
-    for rank, p in enumerate(ranked, 1):
-        data = risk_by_plate[p]
-        routes_str = ",".join(sorted(plate_trips.get(p, set())))
+
+    for rank, key in enumerate(ranked, 1):
+        plate, route = key
+        data = risk_by_pr[key]
         score = _risk_score(data)
         row = (
-            f"{rank:<4}{p:<12}{routes_str[:8]:<10}{data['trips']:<4}"
+            f"{rank:<4}{plate:<12}{route:<8}{data['trips']:<4}"
             f"{data['tire_drag']:<8}{data['temp_fluc']:<8}{data['sensor']:<6}"
             f"{data['reefer_cycles']:<4}{score:<6.1f}"
         )
-        if trend and p in trend:
-            t = trend[p]
-            row += f"{t['anomaly_delta']:+d}{'':>2}{t['score_delta']:+.1f}"
+        if trend and key in trend:
+            t = trend[key]
+            row += f"{t['anomaly_delta']:+d}      {t['score_delta']:+.1f}    "
         lines.append(row)
 
     if trend:
         lines.append("")
-        lines.append("-" * 70)
-        lines.append("月度趋势对比（对比期→当期）")
-        lines.append("-" * 70)
-        for p in sorted(trend.keys(), key=lambda x: -trend[x]["score_delta"]):
-            t = trend[p]
+        lines.append("-" * 90)
+        lines.append("月度趋势对比（对比期→当期，按车牌×线路）")
+        lines.append("-" * 90)
+        for key in sorted(trend.keys(), key=lambda x: -trend[x]["score_delta"]):
+            plate, route = key
+            t = trend[key]
             arrow = "↑" if t["score_delta"] > 0 else ("↓" if t["score_delta"] < 0 else "→")
             lines.append(
-                f"  [{p}] 异常{t['prv_anomaly']}→{t['cur_anomaly']}({t['anomaly_delta']:+d}) "
+                f"  [{plate}] {route}: 异常{t['prv_anomaly']}→{t['cur_anomaly']}({t['anomaly_delta']:+d}) "
                 f"风险{t['prv_score']:.1f}→{t['cur_score']:.1f}({t['score_delta']:+.1f}) {arrow}"
             )
 
     lines.append("")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     lines.append("线路汇总")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     for r in sorted(risk_by_route.keys()):
         rd = risk_by_route[r]
+        worse = rd.get("worse_count", 0)
+        worst_plate = rd.get("highest_risk_plate", "-")
         lines.append(
-            f"  {r}: {rd['anomaly_total']}个异常, "
-            f"胎压拖累{rd['tire_drag']} 温度波动{rd['temp_fluc']} 传感器{rd['sensor']} "
-            f"覆盖{len(rd['vehicles'])}辆车"
+            f"  {r}: 风险分{rd['score']:.1f} | 异常{rd['anomaly_total']} | "
+            f"覆盖{len(rd['vehicles'])}车 | 变差{worse}车 | 最高风险车{worst_plate}"
         )
 
     lines.append("")
-    lines.append("-" * 70)
-    lines.append("高风险提示 TOP5")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
+    lines.append("高风险提示 TOP5（按车牌×线路）")
+    lines.append("-" * 90)
     top = ranked[:5]
     if top:
-        for idx, p in enumerate(top, 1):
-            data = risk_by_plate[p]
+        for idx, key in enumerate(top, 1):
+            plate, route = key
+            data = risk_by_pr[key]
             tips = []
             if data["tire_drag"] > 0:
                 tips.append(f"{data['tire_drag']}次胎压拖累制冷")
@@ -519,23 +696,24 @@ def _build_overview_file(
                 tips.append(f"{data['sensor']}次传感器失准")
             if data["reefer_cycles"] >= 5:
                 tips.append(f"冷机启停累计{data['reefer_cycles']}次")
-            if trend and p in trend and trend[p]["score_delta"] > 0:
-                tips.append(f"风险分较上期+{trend[p]['score_delta']:.1f}")
+            if trend and key in trend and trend[key]["score_delta"] > 0:
+                tips.append(f"风险分较上期+{trend[key]['score_delta']:.1f}")
             if not tips:
                 tips.append("未发现重大异常")
-            lines.append(f"  {idx}. [{p}] " + "；".join(tips))
+            lines.append(f"  {idx}. [{plate}] {route}: " + "；".join(tips))
     else:
         lines.append("  无")
 
     lines.append("")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     lines.append("附件清单")
-    lines.append("-" * 70)
-    lines.append(f"  - 单车明细: ./单车明细/ 目录下共{len(plates)}份文本报告")
+    lines.append("-" * 90)
+    lines.append(f"  - 单车明细: ./单车明细/ 目录下共{len({k[0] for k in scope_keys})}份文本报告")
     lines.append(f"  - Markdown总览: ./复盘总览_{timestamp}.md")
     lines.append(f"  - 异常证据表CSV: ./异常证据表_{timestamp}.csv")
+    lines.append(f"  - 异常闭环清单CSV: ./异常闭环清单_{timestamp}.csv")
     lines.append("")
-    lines.append("=" * 70)
+    lines.append("=" * 90)
 
     filepath = os.path.join(batch_dir, f"复盘总览_{timestamp}.txt")
     with open(filepath, "w", encoding="utf-8") as f:
@@ -544,12 +722,13 @@ def _build_overview_file(
 
 
 def _build_markdown_file(
-    batch_dir, plates, trips, segments, rules,
+    batch_dir, scope_keys, trips, segments, rules,
     plate_filter, date_from, date_to, route_filter, timestamp,
-    risk_by_plate, plate_trips, risk_by_route, trend,
-    prev_date_from, prev_date_to,
+    risk_by_pr, trip_count, plate_routes, risk_by_route, trend,
+    prev_date_from, prev_date_to, per_vehicle_paths,
 ) -> str:
-    ranked = sorted(plates, key=lambda p: -_risk_score(risk_by_plate[p]))
+    ranked = sorted(scope_keys, key=lambda k: -_risk_score(risk_by_pr[k]))
+    dashboard = _route_dashboard_entries(risk_by_route, segments, per_vehicle_paths)
 
     md = []
     md.append("# 🚛 冷链运营月度复盘总览\n")
@@ -561,14 +740,42 @@ def _build_markdown_file(
     md.append(f"- 当期: {date_from or '不限'} ~ {date_to or '不限'}")
     if prev_date_from or prev_date_to:
         md.append(f"- 对比期: {prev_date_from or '不限'} ~ {prev_date_to or '不限'}")
-    md.append(f"- 覆盖车辆: **{len(plates)}** 辆 | 异常片段: **{len(segments)}** 个\n")
+    md.append(f"- 覆盖车辆: **{len({k[0] for k in scope_keys})}** 辆 | "
+             f"车牌×线路组合: **{len(scope_keys)}** | 异常片段: **{len(segments)}** 个\n")
 
     md.append("## 筛查规则\n")
     for line in rules.to_markdown(route_filter).splitlines():
         md.append(line.strip())
     md.append("")
 
-    md.append("## ⚠️ 风险车辆排名\n")
+    md.append("## 📊 线路风险看板\n")
+    md.append("| 线路 | 整体风险分 | 异常数 | 车辆数 | 变差车辆 | 最高风险车 | 最高风险分 |")
+    md.append("|------|-----------|--------|--------|----------|------------|------------|")
+    for r in sorted(dashboard.keys(), key=lambda x: -dashboard[x]["overall_score"]):
+        d = dashboard[r]
+        md.append(
+            f"| {r} | {d['overall_score']:.1f} | {d['anomaly_total']} | {d['vehicle_count']} | "
+            f"{d['worse_count']} | {d['worst_plate'] or '-'} | {d['worst_score']:.1f} |"
+        )
+    md.append("")
+
+    for r in sorted(dashboard.keys(), key=lambda x: -dashboard[x]["overall_score"]):
+        d = dashboard[r]
+        md.append(f"### 🛣️ {r} 线路\n")
+        md.append(f"- **整体风险分**: {d['overall_score']:.1f}")
+        md.append(f"- **异常总数**: {d['anomaly_total']} | **覆盖车辆**: {d['vehicle_count']} | **变差车辆**: {d['worse_count']}")
+        if d["worst_plate"]:
+            md.append(f"- **最高风险车辆**: `{d['worst_plate']}` (风险分 {d['worst_score']:.1f})")
+            if d["evidence_path"]:
+                md.append(f"- **证据文件**: `{d['evidence_path']}`")
+        if d["key_evidence"]:
+            md.append(f"- **重点证据**:")
+            for seg in d["key_evidence"]:
+                icon = {"疑似胎压拖累制冷": "⚠️", "传感器可能失准": "✖️", "单纯温度波动": "△"}.get(seg.label.value, "⚠️")
+                md.append(f"  - {icon} {seg.start_time.strftime('%m-%d %H:%M')} | {seg.label.value} | {seg.detail}")
+        md.append("")
+
+    md.append("## ⚠️ 风险车辆排名（按车牌×线路）\n")
     if trend:
         md.append("| 排名 | 车牌 | 线路 | 行程 | 胎压拖累 | 温度波动 | 传感器 | 启停 | 风险分 | 异常Δ | 风险Δ |")
         md.append("|------|------|------|------|----------|----------|--------|------|--------|--------|--------|")
@@ -576,39 +783,30 @@ def _build_markdown_file(
         md.append("| 排名 | 车牌 | 线路 | 行程 | 胎压拖累 | 温度波动 | 传感器 | 启停 | 风险分 |")
         md.append("|------|------|------|------|----------|----------|--------|------|--------|")
 
-    for rank, p in enumerate(ranked, 1):
-        data = risk_by_plate[p]
-        routes_str = ",".join(sorted(plate_trips.get(p, set())))
+    for rank, key in enumerate(ranked, 1):
+        plate, route = key
+        data = risk_by_pr[key]
         score = _risk_score(data)
-        row = f"| {rank} | {p} | {routes_str} | {data['trips']} | {data['tire_drag']} | {data['temp_fluc']} | {data['sensor']} | {data['reefer_cycles']} | {score:.1f} |"
-        if trend and p in trend:
-            t = trend[p]
+        row = f"| {rank} | {plate} | {route} | {data['trips']} | {data['tire_drag']} | {data['temp_fluc']} | {data['sensor']} | {data['reefer_cycles']} | {score:.1f} |"
+        if trend and key in trend:
+            t = trend[key]
             row += f" {t['anomaly_delta']:+d} | {t['score_delta']:+.1f} |"
         md.append(row)
     md.append("")
 
     if trend:
-        md.append("## 📊 月度趋势对比\n")
-        md.append("| 车牌 | 上期异常 | 当期异常 | 变化 | 上期风险 | 当期风险 | 变化 | 趋势 |")
-        md.append("|------|----------|----------|------|----------|----------|------|------|")
-        for p in sorted(trend.keys(), key=lambda x: -trend[x]["score_delta"]):
-            t = trend[p]
+        md.append("## 📈 月度趋势对比（按车牌×线路）\n")
+        md.append("| 车牌 | 线路 | 上期异常 | 当期异常 | 变化 | 上期风险 | 当期风险 | 变化 | 趋势 |")
+        md.append("|------|------|----------|----------|------|----------|----------|------|------|")
+        for key in sorted(trend.keys(), key=lambda x: -trend[x]["score_delta"]):
+            plate, route = key
+            t = trend[key]
             arrow = "🔴↑" if t["score_delta"] > 0 else ("🟢↓" if t["score_delta"] < 0 else "➡️→")
             md.append(
-                f"| {p} | {t['prv_anomaly']} | {t['cur_anomaly']} | {t['anomaly_delta']:+d} | "
+                f"| {plate} | {route} | {t['prv_anomaly']} | {t['cur_anomaly']} | {t['anomaly_delta']:+d} | "
                 f"{t['prv_score']:.1f} | {t['cur_score']:.1f} | {t['score_delta']:+.1f} | {arrow} |"
             )
         md.append("")
-
-    md.append("## 🛣️ 线路汇总\n")
-    md.append("| 线路 | 异常总数 | 胎压拖累 | 温度波动 | 传感器 | 覆盖车辆 |")
-    md.append("|------|----------|----------|----------|--------|----------|")
-    for r in sorted(risk_by_route.keys()):
-        rd = risk_by_route[r]
-        md.append(
-            f"| {r} | {rd['anomaly_total']} | {rd['tire_drag']} | {rd['temp_fluc']} | {rd['sensor']} | {len(rd['vehicles'])} |"
-        )
-    md.append("")
 
     md.append("## 🔥 重点异常摘要\n")
     high_segs = [
@@ -618,7 +816,7 @@ def _build_markdown_file(
         or s.reefer_cycles >= 4
     ]
     if high_segs:
-        for seg in high_segs[:10]:
+        for seg in high_segs[:15]:
             icon = {"疑似胎压拖累制冷": "⚠️", "传感器可能失准": "✖️", "单纯温度波动": "△"}.get(seg.label.value, "⚠️")
             md.append(f"- {icon} **[{seg.plate}] {seg.route}** {seg.start_time.strftime('%m-%d %H:%M')} | {seg.label.value} | {seg.detail}")
     else:
@@ -626,12 +824,13 @@ def _build_markdown_file(
     md.append("")
 
     md.append("## 📎 附件\n")
-    md.append(f"- 单车明细: `./单车明细/` 目录下共{len(plates)}份文本报告")
+    md.append(f"- 单车明细: `./单车明细/` 目录下共{len({k[0] for k in scope_keys})}份文本报告")
     md.append(f"- 异常证据表: `./异常证据表_{timestamp}.csv`")
+    md.append(f"- 异常闭环清单: `./异常闭环清单_{timestamp}.csv`（待复核轮位+建议处理人+处理状态）")
     md.append("")
 
     md.append("---")
-    md.append(f"*冷链运营数据核对工具 v1.2 | {datetime.now().strftime('%Y-%m-%d')}*")
+    md.append(f"*冷链运营数据核对工具 v1.3 | {datetime.now().strftime('%Y-%m-%d')}*")
 
     filepath = os.path.join(batch_dir, f"复盘总览_{timestamp}.md")
     with open(filepath, "w", encoding="utf-8") as f:
