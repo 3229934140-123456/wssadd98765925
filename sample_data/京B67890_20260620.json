@@ -1,0 +1,17 @@
+[
+  {"timestamp": "2026-06-20 06:00:00", "plate": "京B67890", "route": "R002", "FL": 5.5, "FR": 5.4, "RL": 5.3, "RR": 5.4, "compartment_temp": -20.0, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 06:10:00", "plate": "京B67890", "route": "R002", "FL": 5.5, "FR": 5.4, "RL": 5.3, "RR": 5.4, "compartment_temp": -20.2, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 06:20:00", "plate": "京B67890", "route": "R002", "FL": 5.4, "FR": 5.4, "RL": 5.2, "RR": 5.3, "compartment_temp": -20.5, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 06:30:00", "plate": "京B67890", "route": "R002", "FL": 5.4, "FR": 5.3, "RL": 5.2, "RR": 5.3, "compartment_temp": -15.0, "reefer_status": "OFF"},
+  {"timestamp": "2026-06-20 06:40:00", "plate": "京B67890", "route": "R002", "FL": 5.3, "FR": 5.3, "RL": 5.1, "RR": 5.2, "compartment_temp": -10.0, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 06:50:00", "plate": "京B67890", "route": "R002", "FL": 5.3, "FR": 5.2, "RL": 5.1, "RR": 5.2, "compartment_temp": -18.0, "reefer_status": "OFF"},
+  {"timestamp": "2026-06-20 07:00:00", "plate": "京B67890", "route": "R002", "FL": 5.3, "FR": 5.2, "RL": 5.1, "RR": 5.2, "compartment_temp": -14.0, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 07:10:00", "plate": "京B67890", "route": "R002", "FL": 5.2, "FR": 5.2, "RL": 5.0, "RR": 5.1, "compartment_temp": -12.0, "reefer_status": "OFF"},
+  {"timestamp": "2026-06-20 07:20:00", "plate": "京B67890", "route": "R002", "FL": 5.2, "FR": 5.1, "RL": 5.0, "RR": 5.1, "compartment_temp": -16.0, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 07:30:00", "plate": "京B67890", "route": "R002", "FL": 5.2, "FR": 5.1, "RL": 5.0, "RR": 5.1, "compartment_temp": -19.0, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 07:40:00", "plate": "京B67890", "route": "R002", "FL": 5.1, "FR": 5.1, "RL": 4.9, "RR": 5.0, "compartment_temp": -20.0, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 07:50:00", "plate": "京B67890", "route": "R002", "FL": 5.1, "FR": 5.0, "RL": 4.9, "RR": 5.0, "compartment_temp": -20.3, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 08:00:00", "plate": "京B67890", "route": "R002", "FL": 5.1, "FR": 5.0, "RL": 4.9, "RR": 5.0, "compartment_temp": -20.5, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 08:10:00", "plate": "京B67890", "route": "R002", "FL": 5.0, "FR": 5.0, "RL": 4.8, "RR": 4.9, "compartment_temp": -20.2, "reefer_status": "ON"},
+  {"timestamp": "2026-06-20 08:20:00", "plate": "京B67890", "route": "R002", "FL": 5.0, "FR": 5.0, "RL": 4.8, "RR": 4.9, "compartment_temp": -20.0, "reefer_status": "ON"}
+]
