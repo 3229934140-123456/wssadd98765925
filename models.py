@@ -1,7 +1,10 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from config import ScreenRules
 
 
 class ReeferStatus(Enum):
@@ -98,7 +101,7 @@ class ReviewSummary:
     anomaly_count: int
     raw_segments: List[AnomalySegment] = field(default_factory=list)
 
-    def to_text_report(self) -> str:
+    def to_text_report(self, rules: Optional["ScreenRules"] = None) -> str:
         lines = []
         lines.append("=" * 60)
         lines.append("冷链运输监控复盘摘要")
@@ -108,6 +111,13 @@ class ReviewSummary:
         lines.append(f"日期范围: {self.date_range}")
         lines.append(f"异常片段总数: {self.anomaly_count}")
         lines.append("")
+
+        if rules:
+            lines.append("-" * 60)
+            lines.append("本次采用筛查规则")
+            lines.append("-" * 60)
+            lines.append(rules.to_markdown())
+            lines.append("")
 
         lines.append("-" * 60)
         lines.append("高风险时段")

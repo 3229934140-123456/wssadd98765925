@@ -4,11 +4,10 @@ import os
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from config import ScreenRules
 from models import LogRecord, ReeferStatus, Trip
 
 WHEEL_POSITIONS = ["FL", "FR", "RL", "RR", "FL2", "FR2", "RL2", "RR2"]
-
-TRIP_GAP_MINUTES = 30
 
 
 def _parse_timestamp(val) -> Optional[datetime]:
@@ -134,19 +133,23 @@ def load_logs_from_dir(dirpath: str) -> List[LogRecord]:
     return all_records
 
 
-def group_into_trips(records: List[LogRecord]) -> List[Trip]:
+def group_into_trips(records: List[LogRecord], rules: Optional[ScreenRules] = None) -> List[Trip]:
     if not records:
         return []
-    by_plate: Dict[str, List[LogRecord]] = {}
+    gap = (rules.trip_gap_minutes if rules else 30.0)
+
+    groups: Dict[tuple, List[LogRecord]] = {}
     for rec in records:
-        by_plate.setdefault(rec.plate, []).append(rec)
+        key = (rec.plate, rec.route or "")
+        groups.setdefault(key, []).append(rec)
+
     trips: List[Trip] = []
-    for plate, plate_recs in by_plate.items():
-        sorted_recs = sorted(plate_recs, key=lambda r: r.timestamp)
+    for (plate, route), group_recs in groups.items():
+        sorted_recs = sorted(group_recs, key=lambda r: r.timestamp)
         current = [sorted_recs[0]]
         for i in range(1, len(sorted_recs)):
-            gap = (sorted_recs[i].timestamp - sorted_recs[i - 1].timestamp).total_seconds() / 60
-            if gap > TRIP_GAP_MINUTES:
+            delta = (sorted_recs[i].timestamp - sorted_recs[i - 1].timestamp).total_seconds() / 60
+            if delta > gap:
                 trips.append(
                     Trip(
                         plate=current[0].plate,
@@ -176,6 +179,8 @@ def filter_trips(
     trips: List[Trip],
     plate: Optional[str] = None,
     date_str: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     route: Optional[str] = None,
 ) -> List[Trip]:
     result = trips
@@ -183,6 +188,10 @@ def filter_trips(
         result = [t for t in result if t.plate == plate]
     if date_str:
         result = [t for t in result if t.date_str == date_str]
+    if date_from:
+        result = [t for t in result if t.date_str >= date_from]
+    if date_to:
+        result = [t for t in result if t.date_str <= date_to]
     if route:
         result = [t for t in result if t.route == route]
     return result
